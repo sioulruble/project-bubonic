@@ -48,17 +48,15 @@ class HandDetector:
     
 
 handDetector = HandDetector(min_detection_confidence=0.7)
-webcamFeed = cv2.VideoCapture(0)
+webcamFeed = cv2.VideoCapture(1)
+bubble_size = 1.
 while True:
     status, image = webcamFeed.read()
-    
     handLandmarks = handDetector.findHandLandMarks(image=image, draw=True)
     if len(handLandmarks) > 0:
         x1, y1 = handLandmarks[4][1], handLandmarks[4][2]
         x2, y2 = handLandmarks[8][1], handLandmarks[8][2]
-    
         if(len(handLandmarks) != 0):
-            
             if handDetector.isSizeGesture(handLandmarks):
                 cv2.circle(image, (x1, y1), 15, (255, 0, 255), cv2.FILLED)
                 cv2.circle(image, (x2, y2), 15, (255, 0, 255), cv2.FILLED)
@@ -66,11 +64,9 @@ while True:
                 cv2.putText(image, "Size Gesture", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
                 length = handDetector.changeBubbleSize(handLandmarks)
                 hand_size = math.hypot(handLandmarks[0][1] - handLandmarks[5][1], handLandmarks[0][2] - handLandmarks[5][2])
-                normalized_length = length / hand_size
-                cv2.putText(image, f"Size: {normalized_length:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-                print(normalized_length)
-            else :
-                print("ok")
+                bubble_size = length / hand_size
+
+    cv2.putText(image, f"Size: {bubble_size:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
     cv2.imshow("Volume", image)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
