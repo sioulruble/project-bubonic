@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand-Controlled Bubble Physics Demo</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000;
+            font-family: Arial, sans-serif;
+        }
+        canvas { 
+            display: block; 
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        #videoContainer {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            width: 160px;
+            height: 120px;
+            border-radius: 5px;
+            overflow: hidden;
+            border: 2px solid rgba(255,255,255,0.3);
+            z-index: 100;
+        }
+        #videoInput {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror the video */
+        }
+        #handCanvas {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            width: 160px;
+            height: 120px;
+            border-radius: 5px;
+            transform: scaleX(-1); /* Mirror the canvas */
+            z-index: 101;
+        }
+        #status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            text-align: center;
+            z-index: 200;
+        }
+        .controls {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        button {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            margin: 5px;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: rgba(255,255,255,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div id="info">Move your hand in front of the camera to control the bubble</div>
+    <div id="status">Loading hand tracking...</div>
+    <div id="videoContainer">
+        <video id="videoInput" playsinline></video>
+    </div>
+    <canvas id="handCanvas"></canvas>
+    <div class="controls">
+        <button id="toggleVideo">Hide Camera</button>
+        <button id="toggleTracking">Pause Tracking</button>
+        <button id="toggleMouse">Switch to Mouse Control</button>
+    </div>
+    <div id="loading" class="loading">
+        Loading MediaPipe and Three.js...<br>
+        <small>This may take a few seconds</small>
+    </div>
+    
+    <!-- Three.js library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <!-- MediaPipe Hands library -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    
+    <script>
+        // Main scene variables
+        let scene, camera, renderer, bubble;
+        let mouse = new THREE.Vector2();
+        let targetPosition = new THREE.Vector3(0, 0, 0);
+        let bubbleSize = 1;
+        let isDragging = false;
+        let dreamParticles, particleSystem;
+        let useHandTracking = true;
+
+        // Video and hand tracking variables
+        let videoElement, handCanvas, handCtx;
+        let hands, camera_utils;
+        let handLandmarks = [];
+        let indexFingerTip = { x: 0, y: 0 };
+        let handVisible = false;
+        let trackingActive = true;
+        let videoVisible = true;
+        
+        // Physics variables
+        let velocity = new THREE.Vector3(0, 0, 0);
+        let acceleration = new THREE.Vector3(0, 0, 0);
+        const drag = 0.98; // Water resistance
+        const elasticity = 0.8; // Bounce elasticity
+        const buoyancy = new THREE.Vector3(0, 0, 0); // No gravity - neutrally buoyant
+        const randomMotion = 0.0015; // Small random motion to simulate water currents
+        let walls = {
+            left: -5,
+            right: 5,
+            top: 3,
+            bottom: -3,
+            front: 3,
+            back: -3
+        };
+
+        // Initialize everything
+        document.addEventListener('DOMContentLoaded', () => {
+            setupUI();
+            initMediaPipe().then(() => {
+                init3DScene();
+                document.getElementById('loading').style.display = 'none';
+            }).catch(error => {
+                console.error('Error initializing MediaPipe:', error);
+                document.getElementById('status').innerText = 'Error: ' + error.message;
+                document.getElementById('loading').innerText = 'Error loading hand tracking. Using mouse control instead.';
+                useHandTracking = false;
+                init3DScene();
+                setTimeout(() => {
+                    document.getElementById('loading').style.display = 'none';
+                }, 2000);
+            });
+        });
+        
+        // Setup UI elements and event listeners
+        function setupUI() {
+            // Toggle video visibility
+            document.getElementById('toggleVideo').addEventListener('click', () => {
+                videoVisible = !videoVisible;
+                const videoContainer = document.getElementById('videoContainer');
+                const handCanvas = document.getElementById('handCanvas');
+                
+                if (videoVisible) {
+                    videoContainer.style.display = 'block';
+                    handCanvas.style.display = 'block';
+                    document.getElementById('toggleVideo').innerText = 'Hide Camera';
+                } else {
+                    videoContainer.style.display = 'none';
+                    handCanvas.style.display = 'none';
+                    document.getElementById('toggleVideo').innerText = 'Show Camera';
+                }
+            });
+            
+            // Toggle tracking
+            document.getElementById('toggleTracking').addEventListener('click', () => {
+                trackingActive = !trackingActive;
+                document.getElementById('toggleTracking').innerText = 
+                    trackingActive ? 'Pause Tracking' : 'Resume Tracking';
+            });
+            
+            // Toggle between hand and mouse control
+            document.getElementById('toggleMouse').addEventListener('click', () => {
+                useHandTracking = !useHandTracking;
+                document.getElementById('toggleMouse').innerText = 
+                    useHandTracking ? 'Switch to Mouse Control' : 'Switch to Hand Control';
+                
+                document.getElementById('info').innerText = useHandTracking 
+                    ? 'Move your hand in front of the camera to control the bubble' 
+                    : 'Click and drag to move the bubble';
+            });
+        }
+
+        // Initialize MediaPipe for hand tracking
+        async function initMediaPipe() {
+            // Get UI elements
+            videoElement = document.getElementById('videoInput');
+            handCanvas = document.getElementById('handCanvas');
+            handCtx = handCanvas.getContext('2d');
+            
+            // Set canvas size
+            handCanvas.width = 160;
+            handCanvas.height = 120;
+            
+            // Initialize MediaPipe Hands
+            hands = new Hands({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                }
+            });
+            
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            
+            hands.onResults(onHandResults);
+            
+            // Initialize camera
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    if (trackingActive) {
+                        await hands.send({image: videoElement});
+                    }
+                },
+                width: 160,
+                height: 120
+            });
+            
+            // Start camera
+            await camera.start();
+            document.getElementById('status').innerText = 'Hand tracking active';
+            
+            return true;
+        }
+        
+        // Process hand tracking results
+        function onHandResults(results) {
+            // Clear canvas
+            handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+            
+            // Check if we have any hands
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handVisible = true;
+                handLandmarks = results.multiHandLandmarks[0];
+                
+                // Get index finger tip (landmark 8)
+                indexFingerTip = handLandmarks[8];
+                
+                // Draw landmarks on canvas
+                drawConnectors(handCtx, handLandmarks, HAND_CONNECTIONS, {
+                    color: '#00FF00',
+                    lineWidth: 2
+                });
+                drawLandmarks(handCtx, handLandmarks, {
+                    color: '#FF0000', 
+                    lineWidth: 1,
+                    radius: 3
+                });
+                
+                // Highlight index finger tip
+                handCtx.beginPath();
+                handCtx.arc(
+                    indexFingerTip.x * handCanvas.width, 
+                    indexFingerTip.y * handCanvas.height, 
+                    5, 0, 2 * Math.PI
+                );
+                handCtx.fillStyle = '#FFFF00';
+                handCtx.fill();
+                
+                // Map hand position to 3D space and control bubble
+                if (useHandTracking) {
+                    controlBubbleWithHand();
+                }
+            } else {
+                handVisible = false;
+            }
+        }
+        
+        // Use hand position to control bubble
+        function controlBubbleWithHand() {
+            if (!handVisible || !indexFingerTip) return;
+            
+            // Map finger position from 0-1 to scene coordinates
+            const mappedX = (indexFingerTip.x - 0.5) * 2 * walls.right;
+            const mappedY = (0.5 - indexFingerTip.y) * 2 * walls.top;
+            
+            // Set target position
+            targetPosition.set(mappedX, mappedY, 0);
+            
+            // Create force toward finger position
+            const force = new THREE.Vector3().subVectors(targetPosition, bubble.position);
+            
+            // Scale force based on distance (stronger pull when far away)
+            const distance = force.length();
+            const scaledForce = 0.007 * Math.min(distance, 3.0);
+            force.normalize().multiplyScalar(scaledForce);
+            
+            // Apply force to velocity
+            velocity.add(force);
+            
+            // Update status
+            document.getElementById('status').innerText = 
+                `Hand detected: ${Math.round(mappedX * 100) / 100}, ${Math.round(mappedY * 100) / 100}`;
+        }
+
+        // Initialize the 3D scene
+        function init3DScene() {
+            // Create scene
+            scene = new THREE.Scene();
+            
+            // Create camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+            
+            // Create renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            
+            // Create ethereal dreamlike background
+            createDreamBackground();
+            
+            // Add lights
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+            
+            // Add point lights for dreamy effect
+            addDreamLights();
+            
+            // Create walls (invisible boundaries)
+            createWalls();
+            
+            // Create bubble
+            bubble = createBubble({ x: 0, y: 0, z: 0 }, bubbleSize);
+            scene.add(bubble);
+            
+            // Add event listeners for fallback mouse control
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mousedown', onMouseDown);
+            document.addEventListener('mouseup', onMouseUp);
+            document.addEventListener('wheel', onWheel);
+            
+            // Start animation loop
+            animate();
+        }
+        
+        // Create ethereal dream background
+        function createDreamBackground() {
+            // Create gradient background
+            const vertexShader = `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `;
+            
+            const fragmentShader = `
+                uniform float time;
+                varying vec2 vUv;
+                
+                // Noise functions from https://gist.github.com/patriciogonzalezvivo/670c22f3966e662d2f83
+                float mod289(float x){return x - floor(x * (1.0 / 289.0)) * 289.0;}
+                vec4 mod289(vec4 x){return x - floor(x * (1.0 / 289.0)) * 289.0;}
+                vec4 perm(vec4 x){return mod289(((x * 34.0) + 1.0) * x);}
+                
+                float noise(vec3 p){
+                    vec3 a = floor(p);
+                    vec3 d = p - a;
+                    d = d * d * (3.0 - 2.0 * d);
+                
+                    vec4 b = a.xxyy + vec4(0.0, 1.0, 0.0, 1.0);
+                    vec4 k1 = perm(b.xyxy);
+                    vec4 k2 = perm(k1.xyxy + b.zzww);
+                
+                    vec4 c = k2 + a.zzzz;
+                    vec4 k3 = perm(c);
+                    vec4 k4 = perm(c + 1.0);
+                
+                    vec4 o1 = fract(k3 * (1.0 / 41.0));
+                    vec4 o2 = fract(k4 * (1.0 / 41.0));
+                
+                    vec4 o3 = o2 * d.z + o1 * (1.0 - d.z);
+                    vec2 o4 = o3.yw * d.x + o3.xz * (1.0 - d.x);
+                
+                    return o4.y * d.y + o4.x * (1.0 - d.y);
+                }
+                
+                void main() {
+                    // Deep blue-purple base
+                    vec3 color1 = vec3(0.05, 0.05, 0.2);
+                    // Teal-cyan accent
+                    vec3 color2 = vec3(0.0, 0.15, 0.2);
+                    // Dreamy purple
+                    vec3 color3 = vec3(0.1, 0.0, 0.15);
+                    
+                    // Animated noise
+                    float n = noise(vec3(vUv * 3.0, time * 0.1));
+                    float n2 = noise(vec3(vUv * 5.0 + 20.0, time * 0.1 + 10.0));
+                    
+                    // Radial gradient
+                    vec2 center = vUv - 0.5;
+                    float dist = length(center);
+                    
+                    // Mix colors based on noise and distance
+                    vec3 finalColor = mix(color1, color2, n * 0.5);
+                    finalColor = mix(finalColor, color3, n2 * dist);
+                    
+                    // Add subtle vignette
+                    finalColor *= 1.0 - dist * 0.5;
+                    
+                    // Brighten center slightly to create a glow
+                    finalColor += vec3(0.05, 0.07, 0.1) * smoothstep(0.5, 0.0, dist);
+                    
+                    gl_FragColor = vec4(finalColor, 1.0);
+                }
+            `;
+            
+            const uniforms = {
+                time: { value: 0 }
+            };
+            
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: vertexShader,
+                fragmentShader: fragmentShader
+            });
+            
+            // Create a plane that fills the screen
+            const planeGeometry = new THREE.PlaneGeometry(10, 10);
+            const backgroundPlane = new THREE.Mesh(planeGeometry, material);
+            backgroundPlane.position.z = -2;
+            backgroundPlane.material = material;
+            scene.add(backgroundPlane);
+            scene.background = new THREE.Color(0x000814);
+            
+            // Add dreamy particles
+            createDreamParticles();
+        }
+        
+        // Create floating particles for dreamy effect
+        function createDreamParticles() {
+            const particleCount = 200;
+            dreamParticles = new THREE.BufferGeometry();
+            
+            const positions = new Float32Array(particleCount * 3);
+            const sizes = new Float32Array(particleCount);
+            const colors = new Float32Array(particleCount * 3);
+            const speeds = new Float32Array(particleCount);
+            
+            for (let i = 0; i < particleCount; i++) {
+                // Position
+                positions[i * 3] = (Math.random() - 0.5) * 12;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 8;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 5 - 1;
+                
+                // Size - random between 0.05 and 0.15
+                sizes[i] = 0.05 + Math.random() * 0.1;
+                
+                // Color - soft blues and purples
+                const hue = 0.6 + Math.random() * 0.2; // blues to purples
+                const saturation = 0.3 + Math.random() * 0.3;
+                const lightness = 0.6 + Math.random() * 0.3;
+                
+                const color = new THREE.Color();
+                color.setHSL(hue, saturation, lightness);
+                
+                colors[i * 3] = color.r;
+                colors[i * 3 + 1] = color.g;
+                colors[i * 3 + 2] = color.b;
+                
+                // Speed of movement
+                speeds[i] = 0.002 + Math.random() * 0.008;
+            }
+            
+            dreamParticles.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            dreamParticles.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            dreamParticles.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+            dreamParticles.userData.speeds = speeds;
+            
+            const particleMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 }
+                },
+                vertexShader: `
+                    attribute float size;
+                    varying vec3 vColor;
+                    uniform float time;
+                    
+                    void main() {
+                        vColor = color;
+                        vec3 pos = position;
+                        
+                        // Add gentle floating motion
+                        pos.x += sin(time * 0.5 + position.z * 2.0) * 0.05;
+                        pos.y += cos(time * 0.3 + position.x * 1.5) * 0.05;
+                        
+                        vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                        gl_PointSize = size * (300.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    varying vec3 vColor;
+                    
+                    void main() {
+                        // Create soft circular particles
+                        float dist = length(gl_PointCoord - vec2(0.5, 0.5));
+                        if (dist > 0.5) discard;
+                        
+                        // Smooth edges
+                        float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+                        gl_FragColor = vec4(vColor, alpha * 0.7);
+                    }
+                `,
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+                vertexColors: true
+            });
+            
+            particleSystem = new THREE.Points(dreamParticles, particleMaterial);
+            particleSystem.material = particleMaterial;
+            scene.add(particleSystem);
+        }
+        
+        // Add dreamy lights to the scene
+        function addDreamLights() {
+            // Add several colored point lights
+            const colors = [
+                0x4286f4, // Light blue
+                0x8a2be2, // Purple
+                0x00ced1  // Dark turquoise
+            ];
+            
+            for (let i = 0; i < colors.length; i++) {
+                const light = new THREE.PointLight(colors[i], 0.8, 10);
+                const angle = (i / colors.length) * Math.PI * 2;
+                
+                light.position.set(
+                    Math.cos(angle) * 3,
+                    Math.sin(angle) * 3,
+                    -1
+                );
+                
+                scene.add(light);
+                
+                // Store reference for animation
+                light.userData = {
+                    initialPos: light.position.clone(),
+                    speed: 0.0005 + Math.random() * 0.001,
+                    phase: Math.random() * Math.PI * 2
+                };
+            }
+        }
+        
+        // Create invisible walls for boundaries
+        function createWalls() {
+            // Adjust walls based on camera perspective
+            const aspectRatio = window.innerWidth / window.innerHeight;
+            walls.right = 4;
+            walls.left = -4;
+            walls.top = 4 / aspectRatio;
+            walls.bottom = -4 / aspectRatio;
+        }
+        
+        // Create a bubble with Three.js
+        function createBubble(position = { x: 0, y: 0, z: 0 }, radius = 1) {
+            // Create the basic sphere geometry
+            const geometry = new THREE.SphereGeometry(radius, 64, 64);
+            
+            // Create a custom shader material for the iridescent effect
+            const material = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0 },
+                    resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+                },
+                vertexShader: `
+                    varying vec3 vNormal;
+                    varying vec3 vPosition;
+                    varying vec2 vUv;
+                    
+                    void main() {
+                        vNormal = normal;
+                        vPosition = position;
+                        vUv = uv;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float time;
+                    uniform vec2 resolution;
+                    varying vec3 vNormal;
+                    varying vec3 vPosition;
+                    varying vec2 vUv;
+                    
+                    // Function to create concentric circles pattern
+                    float circles(vec2 position, float radius, float thickness) {
+                        float dist = length(position);
+                        float circle = smoothstep(radius - thickness, radius, dist) - 
+                                      smoothstep(radius, radius + thickness, dist);
+                        return circle;
+                    }
+                    
+                    void main() {
+                        // Base color - more ethereal colors (soft teal with transparency)
+                        vec4 baseColor = vec4(0.4, 0.8, 0.9, 0.6);
+                        
+                        // Create iridescent effect based on viewing angle
+                        float fresnel = pow(1.0 - dot(normalize(vNormal), vec3(0.0, 0.0, 1.0)), 3.0);
+                        vec4 iridescence = vec4(0.2, 0.7, 1.0, 1.0) * fresnel;
+                        
+                        // Create concentric circle pattern
+                        float pattern = 0.0;
+                        for (float i = 0.1; i < 1.0; i += 0.05) {
+                            pattern += circles(vUv - 0.5, i, 0.01) * 0.5;
+                        }
+                        
+                        // Add subtle animation to the pattern
+                        float animatedPattern = pattern * (0.8 + 0.2 * sin(time * 0.3));
+                        
+                        // Create inner glow
+                        float glow = 0.0;
+                        float dist = length(vUv - 0.5);
+                        glow = smoothstep(0.4, 0.0, dist) * 0.5;
+                        
+                        // Add pulsing effect
+                        float pulse = 0.1 * sin(time * 0.4);
+                        
+                        // Combine all effects
+                        vec4 finalColor = baseColor + iridescence + vec4(0.4, 0.9, 1.0, 0.0) * animatedPattern 
+                                         + vec4(0.5, 0.9, 1.0, 0.0) * glow + vec4(0.0, 0.1, 0.2, 0.0) * pulse;
+                        
+                        // Apply transparency
+                        finalColor.a = baseColor.a * (0.4 + 0.6 * fresnel + 0.2 * animatedPattern);
+                        
+                        gl_FragColor = finalColor;
+                    }
+                `,
+                transparent: true,
+                side: THREE.DoubleSide
+            });
+            
+            // Create the bubble mesh
+            const bubbleMesh = new THREE.Mesh(geometry, material);
+            bubbleMesh.position.set(position.x, position.y, position.z);
+            
+            // Add a second layer for the outer glow/halo
+            const haloGeometry = new THREE.SphereGeometry(radius * 1.05, 64, 64);
+            const haloMaterial = new THREE.MeshBasicMaterial({
+                color: 0x88eeff,
+                transparent: true,
+                opacity: 0.2,
+                side: THREE.BackSide
+            });
+            const halo = new THREE.Mesh(haloGeometry, haloMaterial);
+            
+            // Add a third layer for extra ethereal glow
+            const outerHaloGeometry = new THREE.SphereGeometry(radius * 1.2, 32, 32);
+            const outerHaloMaterial = new THREE.MeshBasicMaterial({
+                color: 0x44aaff,
+                transparent: true,
+                opacity: 0.1,
+                side: THREE.BackSide
+            });
+            const outerHalo = new THREE.Mesh(outerHaloGeometry, outerHaloMaterial);
+            
+            // Group the bubble and halos together
+            const bubbleGroup = new THREE.Group();
+            bubbleGroup.add(bubbleMesh);
+            bubbleGroup.add(halo);
+            bubbleGroup.add(outerHalo);
+            
+            // Add reference to the material for updates
+            bubbleGroup.material = material;
+            bubbleGroup.bubbleMesh = bubbleMesh;
+            bubbleGroup.halo = halo;
+            bubbleGroup.outerHalo = outerHalo;
+            bubbleGroup.radius = radius;
+            
+            return bubbleGroup;
+        }
+        
+        // Update bubble size
+        function updateBubbleSize(newSize) {
+            const position = {
+                x: bubble.position.x,
+                y: bubble.position.y,
+                z: bubble.position.z
+            };
+            
+            scene.remove(bubble);
+            bubble = createBubble(position, newSize);
+            scene.add(bubble);
+        }
+        
+        // Handle mouse movement (fallback control)
+        function onMouseMove(event) {
+            if (!useHandTracking && isDragging) {
+                // Convert mouse position to normalized device coordinates
+                mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+                
+                // Convert to world coordinates
+                const vector = new THREE.Vector3(mouse.x, mouse.y, 0);
+                vector.unproject(camera);
+                const dir = vector.sub(camera.position).normalize();
+                const distance = -camera.position.z / dir.z;
+                targetPosition = camera.position.clone().add(dir.multiplyScalar(distance));
+                
+                // Add force to bubble based on mouse movement
+                const force = new THREE.Vector3().subVectors(targetPosition, bubble.position);
+                force.multiplyScalar(0.01);
+                velocity.add(force);
+            }
+        }
+        
+        function onMouseDown(event) {
+            if (!useHandTracking) {
+                isDragging = true;
+                onMouseMove(event);
+                
+                // Slow down the bubble when grabbed
+                velocity.multiplyScalar(0.5);
+            }
+        }
+        
+        function onMouseUp() {
+            if (!useHandTracking) {
+                isDragging = false;
+                
+                // Add a bit of random movement when released
+                velocity.x += (Math.random() - 0.5) * 0.03;
+                velocity.y += (Math.random() - 0.5) * 0.03;
+            }
+        }
+        
+        // Handle mouse wheel for bubble size
+        function onWheel(event) {
+            if (useHandTracking) return;
+            
+            event.preventDefault();
+            const delta = Math.sign(event.deltaY);
+            bubbleSize = THREE.MathUtils.clamp(bubbleSize - delta * 0.1, 0.5, 3);
+            updateBubbleSize(bubbleSize);
+        }
+
+        // Handle window resize
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            createWalls(); // Update wall boundaries based on new aspect ratio
+        }
+
+        // Animation loop
+        function animate(timestamp) {
+            requestAnimationFrame(animate);
+
+            // Update shader uniforms
+            if (bubble.material) bubble.material.uniforms.time.value = timestamp / 1000;
+            if (particleSystem.material) particleSystem.material.uniforms.time.value = timestamp / 1000;
+            
+            // Only update physics if tracking is active
+            if (trackingActive) {
+                // Apply forces
+                acceleration.copy(buoyancy);
+                
+                // Add random motion
+                acceleration.x += (Math.random() - 0.5) * randomMotion;
+                acceleration.y += (Math.random() - 0.5) * randomMotion;
+                acceleration.z += (Math.random() - 0.5) * randomMotion;
+
+                // Update velocity
+                velocity.add(acceleration);
+                velocity.multiplyScalar(drag);
+
+                // Handle wall collisions
+                if (bubble.position.x + velocity.x > walls.right || 
+                    bubble.position.x + velocity.x < walls.left) {
+                    velocity.x *= -elasticity;
+                    bubble.position.x = THREE.MathUtils.clamp(
+                        bubble.position.x, 
+                        walls.left + 0.1, 
+                        walls.right - 0.1
+                    );
+                }
+                
+                if (bubble.position.y + velocity.y > walls.top || 
+                    bubble.position.y + velocity.y < walls.bottom) {
+                    velocity.y *= -elasticity;
+                    bubble.position.y = THREE.MathUtils.clamp(
+                        bubble.position.y, 
+                        walls.bottom + 0.1, 
+                        walls.top - 0.1
+                    );
+                }
+
+                // Update bubble position
+                bubble.position.add(velocity);
+            }
+
+            // Animate dream particles
+            const positions = dreamParticles.attributes.position.array;
+            const speeds = dreamParticles.userData.speeds;
+            for (let i = 0; i < positions.length; i += 3) {
+                positions[i] += Math.sin(timestamp * 0.001 + i) * speeds[i/3];
+                positions[i + 1] += Math.cos(timestamp * 0.001 + i) * speeds[i/3];
+            }
+            dreamParticles.attributes.position.needsUpdate = true;
+
+            // Animate lights
+            scene.traverse(child => {
+                if (child instanceof THREE.PointLight && child.userData.initialPos) {
+                    child.position.x = child.userData.initialPos.x + 
+                        Math.sin(timestamp * child.userData.speed + child.userData.phase) * 2;
+                    child.position.y = child.userData.initialPos.y + 
+                        Math.cos(timestamp * child.userData.speed * 0.8 + child.userData.phase) * 2;
+                }
+            });
+
+            // Rotate bubble slightly
+            bubble.rotation.x += 0.005;
+            bubble.rotation.y += 0.005;
+
+            // Render the scene
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
