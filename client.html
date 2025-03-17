@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Animation de Bulle 3D</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background-size: contain;
+            background-color: #222;
+            color: white;
+        }
+        canvas {
+            display: block;
+        }
+        #info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            max-width: 300px;
+        }
+        #statusBar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-size: 14px;
+            text-align: center;
+            transition: background-color 0.5s;
+        }
+        .status-connected {
+            background-color: rgba(0, 128, 0, 0.7) !important;
+        }
+        .status-disconnected {
+            background-color: rgba(255, 0, 0, 0.7) !important;
+        }
+        .status-connecting {
+            background-color: rgba(255, 165, 0, 0.7) !important;
+        }
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+        .loading h2 {
+            margin-bottom: 20px;
+        }
+        .spinner {
+            border: 5px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top: 5px solid #fff;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="loading" class="loading">
+        <h2>Chargement de l'application...</h2>
+        <div class="spinner"></div>
+    </div>
+    
+    <div id="statusBar">En attente de connexion...</div>
+    <div id="info">Initialisation...</div>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.9/dat.gui.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.9.1/gsap.min.js"></script>
+    <script>
+        // Configuration
+        const wsUrl = 'ws://localhost:8765';  // Ce port sera automatiquement mis à jour par le serveur
+        const backgroundImagePath = 'scenery/background2.jpg'; // Remplacer par le chemin de votre image JPEG
+        const modelPath = 'scenery/bubble.glb';
+        
+        // Variables globales
+        let scene, camera, renderer, bubble, controls;
+        let backgroundMesh;
+        let movementData = {
+            direction: [],
+            vector: [0, 0],
+            size: 1.0,
+            is_size_gesture: false
+        };
+        let socket = null;
+        let reconnectAttempts = 0;
+        let reconnectTimeout = null;
+        
+        // Facteurs de sensibilité
+        const config = {
+            movementSensitivity: 0.1,
+            sizeSensitivity: 1.0,
+            autoRotate: true,
+            showBackground: true,
+            resetPosition: function() {
+                if (bubble) {
+                    gsap.to(bubble.position, {
+                        x: 0,
+                        y: 0,
+                        z: 0,
+                        duration: 1,
+                        ease: "power2.out"
+                    });
+                }
+            }
+        };
+        
+        // Connexion WebSocket
+        function connectWebSocket() {
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+            
+            updateStatus("connecting", `Tentative de connexion au serveur (${reconnectAttempts + 1})...`);
+            
+            socket = new WebSocket(wsUrl);
+            
+            socket.onopen = function() {
+                console.log('Connecté au serveur WebSocket');
+                updateStatus("connected", "Connecté au serveur");
+                reconnectAttempts = 0;
+                if (reconnectTimeout) {
+                    clearTimeout(reconnectTimeout);
+                    reconnectTimeout = null;
+                }
+            };
+            
+            socket.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    movementData = data;
+                    updateInfoPanel(`Direction: ${data.direction.join(', ') || 'Aucune'}, 
+                                    Vecteur: [${data.vector[0].toFixed(1)}, ${data.vector[1].toFixed(1)}], 
+                                    Taille: ${data.size.toFixed(2)}`);
+                } catch (e) {
+                    console.error('Erreur de parsing JSON:', e);
+                }
+            };
+            
+            socket.onclose = function() {
+                console.log('Déconnecté du serveur WebSocket');
+                updateStatus("disconnected", "Déconnecté du serveur");
+                
+                reconnectAttempts++;
+                const timeout = Math.min(30000, Math.pow(1.5, reconnectAttempts) * 1000); // Backoff exponentiel
+                
+                updateInfoPanel(`Déconnecté. Tentative de reconnexion dans ${(timeout/1000).toFixed(1)}s...`);
+                
+                reconnectTimeout = setTimeout(() => {
+                    connectWebSocket();
+                }, timeout);
+            };
+            
+            socket.onerror = function(error) {
+                console.error('Erreur WebSocket:', error);
+                updateStatus("disconnected", "Erreur de connexion");
+            };
+        }
+        
+        // Mise à jour de la barre d'état
+        function updateStatus(status, message) {
+            const statusBar = document.getElementById('statusBar');
+            statusBar.textContent = message;
+            
+            // Supprimer toutes les classes existantes
+            statusBar.classList.remove('status-connected', 'status-disconnected', 'status-connecting');
+            
+            // Ajouter la classe appropriée
+            if (status === "connected") {
+                statusBar.classList.add('status-connected');
+            } else if (status === "disconnected") {
+                statusBar.classList.add('status-disconnected');
+            } else if (status === "connecting") {
+                statusBar.classList.add('status-connecting');
+            }
+        }
+        
+        // Initialisation de Three.js
+        function init() {
+            // Créer la scène
+            scene = new THREE.Scene();
+            
+            // Créer la caméra
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+            
+            // Créer le renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x000000);
+            document.body.appendChild(renderer.domElement);
+            
+            // Ajouter des lumières
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+            
+            // Ajouter OrbitControls si disponible
+            try {
+                controls = new THREE.OrbitControls(camera, renderer.domElement);
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.05;
+            } catch (e) {
+                console.warn("THREE.OrbitControls non disponible:", e);
+            }
+            
+            // Charger le fond d'écran
+            loadBackground();
+            
+            // Créer une bulle 3D
+            createBubble();
+            
+            // Ajouter GUI
+            setupGUI();
+            
+            // Gestion du redimensionnement de la fenêtre
+            window.addEventListener('resize', onWindowResize);
+            
+            // Masquer l'écran de chargement
+            document.getElementById('loading').style.display = 'none';
+            
+            // Connexion WebSocket
+            connectWebSocket();
+            
+            // Démarrer l'animation
+            animate();
+        }
+        
+        // Charger l'image de fond
+        function loadBackground() {
+            const textureLoader = new THREE.TextureLoader();
+            textureLoader.load(
+            backgroundImagePath, 
+            function(texture) {
+                const material = new THREE.MeshBasicMaterial({ 
+                map: texture, 
+                side: THREE.BackSide 
+                });
+                // Reduced sphere size from 500 to 100
+                const geometry = new THREE.SphereGeometry(500, 32, 32);
+                backgroundMesh = new THREE.Mesh(geometry, material);
+                backgroundMesh.visible = config.showBackground;
+                scene.add(backgroundMesh);
+                updateInfoPanel("Fond chargé avec succès");
+            }, 
+            function(xhr) {
+                console.log((xhr.loaded / xhr.total * 100) + '% chargé');
+            },
+            function(error) {
+                console.error('Erreur de chargement de texture:', error);
+                updateInfoPanel("Erreur lors du chargement du fond. Utilisation d'un fond uni.");
+                scene.background = new THREE.Color(0x87CEEB);
+            }
+            );
+        }
+        
+        // Créer une bulle 3D
+        function createBubble() {
+            try {
+                // Vérifier si le GLTFLoader est disponible
+                if (typeof THREE.GLTFLoader !== 'undefined') {
+                    // Chargement du modèle GLB
+                    const loader = new THREE.GLTFLoader();
+                    loader.load(
+                        modelPath,
+                        function(gltf) {
+                            bubble = gltf.scene;
+                            scene.add(bubble);
+                            updateInfoPanel("Modèle 3D chargé avec succès");
+                        },
+                        function(xhr) {
+                            console.log((xhr.loaded / xhr.total * 100) + '% chargé');
+                        },
+                        function(error) {
+                            console.error('Erreur de chargement GLB:', error);
+                            createFallbackBubble();
+                        }
+                    );
+                } else {
+                    // Si GLTFLoader n'est pas disponible, créer une bulle simple
+                    console.log("GLTFLoader non disponible, utilisation d'une bulle simple");
+                    createFallbackBubble();
+                }
+            } catch (e) {
+                console.error("Erreur lors de la création de la bulle:", e);
+                createFallbackBubble();
+            }
+        }
+        
+        // Créer une bulle de secours si le modèle GLB ne peut pas être chargé
+        function createFallbackBubble() {
+            const geometry = new THREE.SphereGeometry(1, 32, 32);
+            const material = new THREE.MeshPhysicalMaterial({
+                color: 0x88ccff,
+                transparent: true,
+                opacity: 0.7,
+                roughness: 0.1,
+                metalness: 0.1,
+                clearcoat: 1.0,
+                clearcoatRoughness: 0.1,
+                reflectivity: 1.0
+            });
+            
+            bubble = new THREE.Mesh(geometry, material);
+            scene.add(bubble);
+            updateInfoPanel("Utilisation d'une bulle simple (modèle 3D non disponible)");
+        }
+        
+// Fonction complètement révisée pour le fond
+function loadBackground() {
+    // Utiliser simplement une couleur de fond au lieu d'une texture sphérique
+    scene.background = new THREE.Color(0x004466); // Bleu profond comme l'eau
+    
+    // Créer un effet lumineux pour simuler les rayons de soleil sous l'eau
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x0044ff, 0.6);
+    scene.add(hemiLight);
+    
+    // Ajouter un brouillard léger pour créer la sensation de profondeur aquatique
+    scene.fog = new THREE.FogExp2(0x004466, 0.035);
+    
+    updateInfoPanel("Environnement aquatique créé");
+}
+
+// Physique complètement révisée pour la bulle
+function updateBubble() {
+    if (!bubble) return;
+    
+    // Initialiser la vélocité si elle n'existe pas
+    bubble.velocity = bubble.velocity || { x: 0, y: 0, z: 0 };
+    
+    // Paramètres physiques
+    const bounds = { x: 4, y: 4, z: 4 }; // Limites plus strictes
+    const waterDensity = 0.96; // Friction de l'eau
+    const bounceFactor = 0.7; // Rebond moins élastique pour plus de contrôle
+    const impulseBase = 0.15; // Force d'impulsion plus modérée
+    
+    // ===== MOUVEMENT PAR COMMANDE =====
+    // Appliquer le mouvement uniquement quand LEFT/RIGHT est détecté
+    if (movementData.direction && movementData.direction.length > 0) {
+        if (movementData.direction.includes("LEFT")) {
+            // Impulsion vers la gauche
+            bubble.velocity.x -= impulseBase * config.movementSensitivity;
+            // Petite impulsion verticale pour l'effet naturel
+            bubble.velocity.y += 0.01 * config.movementSensitivity;
+        }
+        
+        if (movementData.direction.includes("RIGHT")) {
+            // Impulsion vers la droite
+            bubble.velocity.x += impulseBase * config.movementSensitivity;
+            // Petite impulsion verticale pour l'effet naturel
+            bubble.velocity.y += 0.01 * config.movementSensitivity;
+        }
+        
+        // Utiliser le vecteur du mouvement pour des impulsions plus précises
+        if (movementData.vector && movementData.vector.length >= 2) {
+            // Appliquer seulement si nous avons des commandes LEFT/RIGHT
+            if (movementData.direction.includes("LEFT") || movementData.direction.includes("RIGHT")) {
+                bubble.velocity.x += movementData.vector[0] * 0.015 * config.movementSensitivity;
+                bubble.velocity.y += -movementData.vector[1] * 0.005 * config.movementSensitivity;
+            }
+        }
+    }
+    
+    // ===== PHYSIQUE DE L'EAU =====
+    // Effet de flottabilité - tendance à remonter doucement
+    bubble.velocity.y += 0.001;
+    
+    // Appliquer la résistance de l'eau (ralentit plus fortement que l'air)
+    bubble.velocity.x *= waterDensity;
+    bubble.velocity.y *= waterDensity;
+    bubble.velocity.z *= waterDensity;
+    
+    // ===== DÉPLACEMENT =====
+    // Mettre à jour la position en fonction de la vélocité
+    bubble.position.x += bubble.velocity.x;
+    bubble.position.y += bubble.velocity.y;
+    bubble.position.z += bubble.velocity.z;
+    
+    // ===== GESTION DES REBONDS =====
+    // Vérifier et corriger les collisions avec les bords
+    Object.keys(bounds).forEach(axis => {
+        // Si la bulle dépasse les limites
+        if (Math.abs(bubble.position[axis]) > bounds[axis]) {
+            // 1. Replacer la bulle exactement à la limite
+            bubble.position[axis] = Math.sign(bubble.position[axis]) * bounds[axis];
+            
+            // 2. Inverser la direction avec amortissement
+            bubble.velocity[axis] = -bubble.velocity[axis] * bounceFactor;
+            
+            // 3. Ajouter un effet visuel simple de déformation lors du rebond
+            const originalScale = bubble.scale.clone(); // Sauvegarder l'échelle originale
+            
+            // Créer la déformation: compression dans la direction du rebond
+            const squishScale = originalScale.clone();
+            if (axis === 'x') {
+                squishScale.x *= 0.7; // Écrasement horizontal
+                squishScale.y *= 1.15; // Léger étirement vertical
+            } else if (axis === 'y') {
+                squishScale.y *= 0.7; // Écrasement vertical
+                squishScale.x *= 1.15; // Léger étirement horizontal
+            } else {
+                squishScale.z *= 0.7; // Écrasement en profondeur
+                squishScale.x *= 1.1; // Léger étirement latéral
+            }
+            
+            // Appliquer l'animation de déformation
+            gsap.to(bubble.scale, {
+                x: squishScale.x,
+                y: squishScale.y,
+                z: squishScale.z,
+                duration: 0.1,
+                ease: "power1.out",
+                onComplete: () => {
+                    // Revenir à la forme originale avec un léger effet de rebond
+                    gsap.to(bubble.scale, {
+                        x: originalScale.x,
+                        y: originalScale.y,
+                        z: originalScale.z,
+                        duration: 0.2,
+                        ease: "elastic.out(1.2, 0.5)"
+                    });
+                }
+            });
+        }
+    });
+    
+    // ===== EFFETS AQUATIQUES =====
+    // Mouvement subtil de flottaison (courants d'eau)
+    const time = Date.now() * 0.001;
+    bubble.position.y += Math.sin(time * 0.7) * 0.003;
+    bubble.position.x += Math.cos(time * 0.5) * 0.001;
+    
+    // Rotation en fonction du mouvement dans l'eau
+    if (config.autoRotate) {
+        const speedFactor = Math.sqrt(
+            bubble.velocity.x * bubble.velocity.x + 
+            bubble.velocity.y * bubble.velocity.y + 
+            bubble.velocity.z * bubble.velocity.z
+        );
+        
+        // Rotation de base + rotation supplémentaire basée sur la vitesse
+        bubble.rotation.y += 0.003 + speedFactor * 0.02;
+        bubble.rotation.x += 0.001 + speedFactor * 0.01;
+    }
+    
+    // ===== CHANGEMENT DE TAILLE =====
+    if (movementData.is_size_gesture) {
+        const targetScale = movementData.size * config.sizeSensitivity;
+        gsap.to(bubble.scale, {
+            x: targetScale,
+            y: targetScale,
+            z: targetScale,
+            duration: 0.3,
+            ease: "back.out(1.2)"  // Effet élastique léger
+        });
+    }
+}
+
+// Ajoutez également cette fonction pour créer une bulle plus jolie
+// si vous souhaitez remplacer également la fonction createFallbackBubble()
+function createFallbackBubble() {
+    const geometry = new THREE.SphereGeometry(1, 32, 32);
+    const material = new THREE.MeshPhysicalMaterial({
+        color: 0x88ccff,
+        transparent: true,
+        opacity: 0.8,
+        roughness: 0.1,
+        metalness: 0.0,
+        clearcoat: 1.0,
+        clearcoatRoughness: 0.1,
+        reflectivity: 1.0,
+        envMapIntensity: 1.0
+    });
+    
+    bubble = new THREE.Mesh(geometry, material);
+    
+    // Ajouter un effet de réfraction pour l'aspect "aquatique"
+    const envMapTexture = new THREE.TextureLoader().load('https://threejs.org/examples/textures/2294472375_24a3b8ef46_o.jpg');
+    envMapTexture.mapping = THREE.EquirectangularReflectionMapping;
+    material.envMap = envMapTexture;
+    
+    scene.add(bubble);
+    updateInfoPanel("Bulle d'eau créée");
+}
+
+// Ajoutez cette modification à la fonction init() pour améliorer l'éclairage
+// Ajoutez ce bloc après la création des lumières existantes
+function enhanceLighting() {
+    // Supprimer les lumières existantes (optional)
+    scene.children.forEach(child => {
+        if (child instanceof THREE.Light) {
+            scene.remove(child);
+        }
+    });
+    
+    // Créer un meilleur éclairage pour l'effet aquatique
+    const ambientLight = new THREE.AmbientLight(0x6688cc, 0.6);
+    scene.add(ambientLight);
+    
+    const mainLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    mainLight.position.set(1, 2, 1);
+    scene.add(mainLight);
+    
+    const backLight = new THREE.DirectionalLight(0x0066ff, 0.4);
+    backLight.position.set(-1, -1, -1);
+    scene.add(backLight);
+}
+        
+        // Configuration de l'interface utilisateur
+        function setupGUI() {
+            try {
+                const gui = new dat.GUI();
+                gui.add(config, 'movementSensitivity', 0.01, 1).name('Sensibilité Mvt');
+                gui.add(config, 'sizeSensitivity', 0.1, 3).name('Sensibilité Taille');
+                gui.add(config, 'autoRotate').name('Rotation Auto');
+                gui.add(config, 'showBackground').name('Afficher Fond').onChange(function(value) {
+                    if (backgroundMesh) backgroundMesh.visible = value;
+                });
+                gui.add(config, 'resetPosition').name('Centrer Bulle');
+            } catch (e) {
+                console.error("Erreur lors de la configuration de GUI:", e);
+            }
+        }
+        
+        // Gestion du redimensionnement de la fenêtre
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        // Mettre à jour le panneau d'information
+        function updateInfoPanel(text) {
+            document.getElementById('info').innerHTML = text;
+        }
+        
+        // Boucle d'animation
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Mettre à jour les contrôles
+            if (controls) {
+                controls.update();
+            }
+            
+            // Mettre à jour la bulle
+            updateBubble();
+            
+            // Rendu de la scène
+            renderer.render(scene, camera);
+        }
+        
+        // Vérifier si Three.js est chargé
+        function checkDependencies() {
+            if (typeof THREE === 'undefined') {
+                updateInfoPanel("Erreur: Three.js n'est pas chargé. Actualisation de la page dans 5 secondes...");
+                setTimeout(() => {
+                    window.location.reload();
+                }, 5000);
+                return false;
+            }
+            return true;
+        }
+        
+        // Démarrer l'application
+        window.onload = function() {
+            if (checkDependencies()) {
+                // Démarrer avec un petit délai pour s'assurer que tout est chargé
+                setTimeout(init, 500);
+            }
+        };
+    </script>
+</body>
+</html>
